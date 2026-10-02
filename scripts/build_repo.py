@@ -219,7 +219,7 @@ def validate_selected_run(
 ) -> None:
     raw = run_capture(
         [gh, "run", "view", str(run_id), "--repo", github_repo,
-         "--json", "databaseId,runNumber,headSha,workflowName,status,conclusion"],
+         "--json", "databaseId,number,headSha,workflowName,status,conclusion"],
         env=env,
     )
     try:
@@ -228,7 +228,7 @@ def validate_selected_run(
         raise RepoError("GitHub Actions did not return valid selected Release run metadata") from error
     expected = {
         "databaseId": run_id,
-        "runNumber": run_number,
+        "number": run_number,
         "headSha": source_sha,
         "workflowName": "Release",
         "status": "completed",

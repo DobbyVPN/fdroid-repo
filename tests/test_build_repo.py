@@ -43,6 +43,48 @@ class BuildRepoTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = build_repo.load_repository_config(REPO_ROOT / "repository.json")
 
+    def test_selected_run_uses_gh_number_field_and_preserves_release_checks(self) -> None:
+        run = {
+            "databaseId": 37029487478,
+            "number": 2260,
+            "headSha": "553076bad4f28d36fd848a869ddd1359e6dbb285",
+            "workflowName": "Release",
+            "status": "completed",
+            "conclusion": "success",
+        }
+        expected_fields = "databaseId,number,headSha,workflowName,status,conclusion"
+        with patch.object(build_repo, "run_capture", return_value=json.dumps(run).encode()) as command:
+            build_repo.validate_selected_run(
+                "gh", "DobbyVPN/DobbyVPN", 37029487478, 2260,
+                "553076bad4f28d36fd848a869ddd1359e6dbb285", {},
+            )
+            self.assertEqual(command.call_args.args[0][-1], expected_fields)
+
+        for field, value in run.items():
+            if field == "number":
+                wrong_value = value + 1
+            elif field == "databaseId":
+                wrong_value = value + 1
+            elif field == "headSha":
+                wrong_value = "a" * 40
+            elif field == "workflowName":
+                wrong_value = "Other"
+            elif field == "status":
+                wrong_value = "in_progress"
+            else:
+                wrong_value = "failure"
+            with self.subTest(field=field), patch.object(
+                build_repo, "run_capture", return_value=json.dumps({**run, field: wrong_value}).encode()
+            ):
+                with self.assertRaisesRegex(
+                    build_repo.RepoError,
+                    "successful Release for this source SHA",
+                ):
+                    build_repo.validate_selected_run(
+                        "gh", "DobbyVPN/DobbyVPN", 37029487478, 2260,
+                        "553076bad4f28d36fd848a869ddd1359e6dbb285", {},
+                    )
+
     def test_add_link_uses_fdroid_syntax_and_repository_fingerprint(self) -> None:
         url = build_repo.add_repository_url(self.config)
         self.assertEqual(
