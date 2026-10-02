@@ -20,10 +20,20 @@ on:
         description: Prepare an empty signed catalog without publishing an app.
         default: false
         type: boolean
+    # Callers map these names explicitly so GitHub resolves the protected
+    # caller environment's values even when no repository secret exists.
+    secrets:
+      FDROID_REPO_KEYSTORE:
+        required: false
+      FDROID_KEYSTORE_PASSWORD:
+        required: false
+      FDROID_KEY_PASSWORD:
+        required: false
 
 permissions:
   contents: read
   actions: read
+  deployments: read
   pages: write
   id-token: write
 
@@ -124,6 +134,8 @@ jobs:
           mkdir "$private_dir"
           trap 'rm -rf "$private_dir"' EXIT
           test -n "$FDROID_REPO_KEYSTORE"
+          test -n "$FDROID_KEYSTORE_PASSWORD"
+          test -n "$FDROID_KEY_PASSWORD"
           printf '%s' "$FDROID_REPO_KEYSTORE" | base64 --decode > "$private_dir/repository.keystore"
           alias="$(python -c 'import json; print(json.load(open("publisher/repository.json"))["key_alias"])')"
           args=(--output "$RUNNER_TEMP/fdroid-site" --keystore "$private_dir/repository.keystore" --alias "$alias")

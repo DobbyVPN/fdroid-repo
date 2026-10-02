@@ -472,6 +472,80 @@ def download_previous_index(previous_url: str, fingerprint: str) -> Any:
     return index_v2
 
 
+def _slurped_api_collection(raw: bytes, description: str) -> list[Any]:
+    try:
+        pages = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RepoError(f"GitHub {description} API did not return valid JSON") from error
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise RepoError(f"GitHub {description} API response is malformed")
+    return [record for page in pages for record in page]
+
+
+def _deployment_job_url(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(
+        r"https://github\.com/DobbyVPN/DobbyVPN/actions/runs/([0-9]+)/job/([0-9]+)", value
+    )
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _history_proves_unpublished(
+    gh: str, github_repo: str, env: dict[str, str]
+) -> bool:
+    raw = run_capture([
+        gh, "api", "--paginate", "--slurp",
+        f"repos/{github_repo}/deployments?environment=github-pages&per_page=100",
+    ], env=env)
+    deployments = _slurped_api_collection(raw, "deployment history")
+    if not deployments:
+        return True
+
+    active_states = {"waiting", "queued", "pending", "in_progress"}
+    current_run_id = env.get("GITHUB_RUN_ID")
+    for deployment in deployments:
+        if not isinstance(deployment, dict) or type(deployment.get("id")) is not int:
+            return False
+        raw = run_capture([
+            gh, "api", "--paginate", "--slurp",
+            f"repos/{github_repo}/deployments/{deployment['id']}/statuses?per_page=100",
+        ], env=env)
+        statuses = _slurped_api_collection(raw, "deployment statuses")
+        if not statuses or any(not isinstance(row, dict) for row in statuses):
+            return False
+
+        urls = {row.get("log_url") for row in statuses}
+        if len(urls) != 1:
+            return False
+        job_url = _deployment_job_url(next(iter(urls)))
+        if job_url is None:
+            return False
+        run_id, job_id = job_url
+        states = [row.get("state") for row in statuses]
+        if current_run_id and run_id == current_run_id and all(state in active_states for state in states):
+            continue
+        if any(state == "success" for state in states):
+            return False
+
+        raw = run_capture([gh, "api", f"repos/{github_repo}/actions/jobs/{job_id}"], env=env)
+        try:
+            job = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise RepoError("GitHub deployment job API did not return valid JSON") from error
+        if not isinstance(job, dict) or str(job.get("run_id")) != run_id or job.get("status") != "completed":
+            return False
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            return False
+        deploy_steps = [step for step in steps if isinstance(step, dict) and step.get("name") == "Deploy repository"]
+        if len(deploy_steps) != 1 or deploy_steps[0].get("conclusion") != "skipped":
+            return False
+    return True
+
+
 def verify_initialization_target(
     gh: str, github_repo: str, previous_url: str, fingerprint: str, env: dict[str, str]
 ) -> None:
@@ -488,30 +562,22 @@ def verify_initialization_target(
     status = pages["status"]
     if status not in (None, "built"):
         raise RepoError(f"GitHub Pages status is {status!r}; refusing repository initialization")
-    # Workflow-based Pages may report null after deployment. Native deployment
-    # records, rather than that status alone, establish first activation.
-    raw = run_capture([
-        gh, "api", f"repos/{github_repo}/deployments?environment=github-pages&per_page=2"
-    ], env=env)
-    deployments = json.loads(raw.decode("utf-8"))
-    if not isinstance(deployments, list):
-        raise RepoError("GitHub deployment history is malformed")
-    first_activation = not deployments
-    if len(deployments) == 1 and env.get("GITHUB_RUN_ID"):
-        deployment_id = deployments[0]["id"]
-        raw = run_capture([
-            gh, "api", f"repos/{github_repo}/deployments/{deployment_id}/statuses"
-        ], env=env)
-        statuses = json.loads(raw.decode("utf-8"))
-        current_run = f"https://github.com/{github_repo}/actions/runs/{env['GITHUB_RUN_ID']}/job/"
-        first_activation = bool(statuses) and all(
-            row.get("state") in ("queued", "pending", "in_progress")
-            and row.get("log_url", "").startswith(current_run)
-            for row in statuses
-        )
+    history_error: RepoError | None = None
+    try:
+        first_activation = _history_proves_unpublished(gh, github_repo, env)
+    except RepoError as error:
+        # Incomplete or malformed native history cannot authorize activation;
+        # a valid signed index can still prove the public repository is empty.
+        first_activation = False
+        history_error = error
     if status is None and first_activation:
         return
-    index_v2 = download_previous_index(previous_url, fingerprint)
+    try:
+        index_v2 = download_previous_index(previous_url, fingerprint)
+    except RepoError as error:
+        if history_error is not None:
+            raise RepoError(f"{history_error}; {error}") from error
+        raise
     packages = index_v2.get("packages")
     if not isinstance(packages, dict):
         raise RepoError("existing public repository has a malformed signed package index")

@@ -73,49 +73,149 @@ class BuildRepoTests(unittest.TestCase):
                     assets=assets,
                 )
 
-    def test_initialize_requires_unpublished_or_verified_empty_pages(self) -> None:
+    def test_initialize_accepts_empty_or_current_waiting_deployment_history(self) -> None:
         pages = json.dumps({"status": None}).encode()
-        with patch.object(build_repo, "run_capture", side_effect=[pages, b"[]"]) as command:
+        with patch.object(build_repo, "run_capture", side_effect=[pages, b"[[]]"]) as command:
             build_repo.verify_initialization_target(
                 "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
             )
-            self.assertEqual(command.call_count, 2)
+            self.assertIn("--paginate", command.call_args_list[1].args[0])
+            self.assertIn("--slurp", command.call_args_list[1].args[0])
 
-        with patch.object(build_repo, "run_capture", side_effect=[json.dumps({"status": "built"}).encode(), b"[]"]), \
-             patch.object(build_repo, "download_previous_index", return_value={"packages": {}}):
-            build_repo.verify_initialization_target(
-                "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
-            )
-
-        old_deployment = [{"id": 21}]
-        old_status = [{
-            "state": "success",
-            "log_url": "https://github.com/DobbyVPN/DobbyVPN/actions/runs/100/job/200",
-        }]
-        with patch.object(build_repo, "run_capture", side_effect=[pages, json.dumps(old_deployment).encode(), json.dumps(old_status).encode()]), \
-             patch.object(build_repo, "download_previous_index", return_value={"packages": {build_repo.APP_ID: {}}}) as index:
-            with self.assertRaisesRegex(build_repo.RepoError, "contains packages"):
-                build_repo.verify_initialization_target(
-                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"],
-                    {"GITHUB_RUN_ID": "999"},
-                )
-            index.assert_called_once()
-
-        current_status = [{
-            "state": "in_progress",
+        deployment = {"id": 21}
+        current_status = {
+            "state": "waiting",
             "log_url": "https://github.com/DobbyVPN/DobbyVPN/actions/runs/999/job/300",
-        }]
+        }
         with patch.object(build_repo, "run_capture", side_effect=[
             pages,
-            json.dumps(old_deployment).encode(),
-            json.dumps(current_status).encode(),
+            json.dumps([[deployment]]).encode(),
+            json.dumps([[current_status]]).encode(),
         ]) as command, patch.object(build_repo, "download_previous_index") as index:
             build_repo.verify_initialization_target(
                 "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"],
                 {"GITHUB_RUN_ID": "999"},
             )
             self.assertEqual(command.call_count, 3)
+            self.assertIn("--paginate", command.call_args_list[2].args[0])
+            self.assertIn("--slurp", command.call_args_list[2].args[0])
             index.assert_not_called()
+
+    def test_initialize_allows_two_failed_attempts_with_explicitly_skipped_deploy_step(self) -> None:
+        pages = json.dumps({"status": None}).encode()
+        deployments = [[{"id": 41}], [{"id": 42}]]
+
+        def status(run_id: str) -> bytes:
+            return json.dumps([[
+                {
+                    "state": "failure",
+                    "log_url": f"https://github.com/DobbyVPN/DobbyVPN/actions/runs/{run_id}/job/{int(run_id) + 1000}",
+                }
+            ]]).encode()
+
+        def job(run_id: str) -> bytes:
+            return json.dumps({
+                "run_id": int(run_id),
+                "status": "completed",
+                "steps": [{"name": "Deploy repository", "conclusion": "skipped"}],
+            }).encode()
+
+        with patch.object(build_repo, "run_capture", side_effect=[
+            pages,
+            json.dumps(deployments).encode(),
+            status("101"),
+            job("101"),
+            status("102"),
+            job("102"),
+        ]) as command, patch.object(build_repo, "download_previous_index") as index:
+            build_repo.verify_initialization_target(
+                "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+            )
+            self.assertEqual(command.call_count, 6)
+            self.assertIn("actions/jobs/1101", command.call_args_list[3].args[0][-1])
+            self.assertIn("actions/jobs/1102", command.call_args_list[5].args[0][-1])
+            index.assert_not_called()
+
+    def test_initialize_paginates_past_new_deployments_before_accepting_history(self) -> None:
+        pages = json.dumps({"status": None}).encode()
+        deployments = [[{"id": 43}, {"id": 44}], [{"id": 1}]]
+        successful_status = [{
+            "state": "success",
+            "log_url": "https://github.com/DobbyVPN/DobbyVPN/actions/runs/100/job/200",
+        }]
+        with patch.object(build_repo, "run_capture", side_effect=[
+            pages,
+            json.dumps(deployments).encode(),
+            json.dumps([[{"state": "failure", "log_url": "https://github.com/DobbyVPN/DobbyVPN/actions/runs/101/job/201"}]]).encode(),
+            json.dumps({
+                "run_id": 101,
+                "status": "completed",
+                "steps": [{"name": "Deploy repository", "conclusion": "skipped"}],
+            }).encode(),
+            json.dumps([[{"state": "failure", "log_url": "https://github.com/DobbyVPN/DobbyVPN/actions/runs/102/job/202"}]]).encode(),
+            json.dumps({
+                "run_id": 102,
+                "status": "completed",
+                "steps": [{"name": "Deploy repository", "conclusion": "skipped"}],
+            }).encode(),
+            json.dumps([successful_status]).encode(),
+        ]) as command, patch.object(
+            build_repo, "download_previous_index", return_value={"packages": {build_repo.APP_ID: {}}}
+        ) as index:
+            with self.assertRaisesRegex(build_repo.RepoError, "contains packages"):
+                build_repo.verify_initialization_target(
+                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+                )
+            self.assertIn("--paginate", command.call_args_list[1].args[0])
+            self.assertIn("per_page=100", command.call_args_list[1].args[0][-1])
+            index.assert_called_once()
+
+    def test_initialize_requires_verified_empty_index_after_deploy_step_ran(self) -> None:
+        pages = json.dumps({"status": None}).encode()
+        deployments = json.dumps([[{"id": 51}]]).encode()
+        statuses = json.dumps([[
+            {
+                "state": "failure",
+                "log_url": "https://github.com/DobbyVPN/DobbyVPN/actions/runs/150/job/250",
+            }
+        ]]).encode()
+        job = json.dumps({
+            "run_id": 150,
+            "status": "completed",
+            "conclusion": "failure",
+            "steps": [{"name": "Deploy repository", "conclusion": "success"}],
+        }).encode()
+        with patch.object(build_repo, "run_capture", side_effect=[pages, deployments, statuses, job]), \
+             patch.object(
+                 build_repo, "download_previous_index", return_value={"packages": {build_repo.APP_ID: {}}}
+             ) as index:
+            with self.assertRaisesRegex(build_repo.RepoError, "contains packages"):
+                build_repo.verify_initialization_target(
+                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+                )
+            index.assert_called_once_with(self.config["repo_url"], self.config["fingerprint"])
+
+        with patch.object(build_repo, "run_capture", side_effect=[pages, deployments, statuses, job]), \
+             patch.object(build_repo, "download_previous_index", return_value={"packages": {}}) as index:
+            build_repo.verify_initialization_target(
+                "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+            )
+            index.assert_called_once()
+
+    def test_initialize_requires_a_signed_empty_index_when_pages_are_already_built(self) -> None:
+        with patch.object(build_repo, "run_capture", side_effect=[
+            json.dumps({"status": "built"}).encode(), b"[[]]",
+        ]), patch.object(build_repo, "download_previous_index", return_value={"packages": {}}) as index:
+            build_repo.verify_initialization_target(
+                "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+            )
+            index.assert_called_once()
+
+        with patch.object(build_repo, "run_capture", return_value=json.dumps({"status": "building"}).encode()):
+            with self.assertRaisesRegex(build_repo.RepoError, "status"):
+                build_repo.verify_initialization_target(
+                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+                )
 
         with patch.object(build_repo, "run_capture") as command:
             with self.assertRaisesRegex(build_repo.RepoError, "hosted on DobbyVPN/DobbyVPN"):
@@ -124,19 +224,21 @@ class BuildRepoTests(unittest.TestCase):
                 )
             command.assert_not_called()
 
-        with patch.object(build_repo, "run_capture", side_effect=[pages, json.dumps(old_deployment).encode(), json.dumps(old_status).encode()]), \
-             patch.object(build_repo, "download_previous_index", side_effect=build_repo.RepoError("index TLS/signature failure")):
-            with self.assertRaisesRegex(build_repo.RepoError, "TLS/signature failure"):
-                build_repo.verify_initialization_target(
-                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"],
-                    {"GITHUB_RUN_ID": "999"},
-                )
-
-        with patch.object(build_repo, "run_capture", return_value=json.dumps({"status": "building"}).encode()):
-            with self.assertRaisesRegex(build_repo.RepoError, "status"):
+    def test_initialize_reports_malformed_native_history_if_index_verification_fails(self) -> None:
+        with patch.object(build_repo, "run_capture", side_effect=[
+            json.dumps({"status": None}).encode(), b"not JSON",
+        ]), patch.object(
+            build_repo, "download_previous_index", side_effect=build_repo.RepoError("index TLS/signature failure")
+        ) as index:
+            with self.assertRaisesRegex(
+                build_repo.RepoError,
+                "deployment history API did not return valid JSON; index TLS/signature failure",
+            ):
                 build_repo.verify_initialization_target(
                     "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
                 )
+            index.assert_called_once()
+
     def test_release_asset_allowlist_rejects_unexpected_files(self) -> None:
         expected = build_repo.expected_release_assets("1.5.2")
         with tempfile.TemporaryDirectory() as raw:

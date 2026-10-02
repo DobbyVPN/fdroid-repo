@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: DobbyVPN/DobbyVPN
-          ref: 28ecf48514c90a0f66926b1aba650a3756db7b73
+          ref: f4be06c9d2e0079d421b5d19ad8248b9b2985541
           path: DobbyVPN
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
