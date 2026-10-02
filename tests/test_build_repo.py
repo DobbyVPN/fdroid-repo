@@ -2,14 +2,41 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import ssl
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import requests
+from urllib3.exceptions import MaxRetryError, SSLError as Urllib3SSLError
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import build_repo
+
+
+def wrap_index_error(cause: Exception) -> build_repo.RepoError:
+    try:
+        raise build_repo.RepoError("fdroidserver could not verify the previous repository index") from cause
+    except build_repo.RepoError as error:
+        return error
+
+
+def http_error(url: str, status: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    response.url = url
+    return requests.HTTPError(response=response)
+
+
+def hostname_error(url: str, verify_code: int = 62) -> requests.exceptions.SSLError:
+    certificate_error = ssl.SSLCertVerificationError(1, "hostname mismatch")
+    certificate_error.verify_code = verify_code
+    transport_error = Urllib3SSLError(certificate_error)
+    retry_error = MaxRetryError(None, url, reason=transport_error)
+    request = requests.Request("GET", url).prepare()
+    return requests.exceptions.SSLError(retry_error, request=request)
 
 
 class BuildRepoTests(unittest.TestCase):
@@ -75,12 +102,15 @@ class BuildRepoTests(unittest.TestCase):
 
     def test_initialize_accepts_empty_or_current_waiting_deployment_history(self) -> None:
         pages = json.dumps({"status": None}).encode()
-        with patch.object(build_repo, "run_capture", side_effect=[pages, b"[[]]"]) as command:
+        with patch.object(build_repo, "run_capture", side_effect=[pages, b"[[]]"]) as command, patch.object(
+            build_repo, "download_previous_index", return_value={"packages": {}}
+        ) as index:
             build_repo.verify_initialization_target(
                 "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
             )
             self.assertIn("--paginate", command.call_args_list[1].args[0])
             self.assertIn("--slurp", command.call_args_list[1].args[0])
+            index.assert_called_once()
 
         deployment = {"id": 21}
         current_status = {
@@ -92,6 +122,7 @@ class BuildRepoTests(unittest.TestCase):
             json.dumps([[deployment]]).encode(),
             json.dumps([[current_status]]).encode(),
         ]) as command, patch.object(build_repo, "download_previous_index") as index:
+            index.return_value = {"packages": {}}
             build_repo.verify_initialization_target(
                 "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"],
                 {"GITHUB_RUN_ID": "999"},
@@ -99,7 +130,57 @@ class BuildRepoTests(unittest.TestCase):
             self.assertEqual(command.call_count, 3)
             self.assertIn("--paginate", command.call_args_list[2].args[0])
             self.assertIn("--slurp", command.call_args_list[2].args[0])
-            index.assert_not_called()
+            index.assert_called_once()
+
+    def test_initialize_rejects_nonempty_index_even_when_history_is_empty(self) -> None:
+        with patch.object(build_repo, "run_capture", side_effect=[
+            json.dumps({"status": None}).encode(), b"[[]]",
+        ]), patch.object(
+            build_repo, "download_previous_index", return_value={"packages": {build_repo.APP_ID: {}}}
+        ) as index:
+            with self.assertRaisesRegex(build_repo.RepoError, "contains packages"):
+                build_repo.verify_initialization_target(
+                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+                )
+            index.assert_called_once()
+
+    def test_initialize_allows_only_exact_entry_jar_bootstrap_absence(self) -> None:
+        pages = json.dumps({"status": None}).encode()
+        entry_url = f"{self.config['repo_url']}/entry.jar"
+        previous_url = f"{self.config['repo_url']}?fingerprint=ignored#fragment"
+        absence_errors = [
+            wrap_index_error(http_error(entry_url, 404)),
+            wrap_index_error(hostname_error(entry_url)),
+        ]
+        for error in absence_errors:
+            with self.subTest(cause=type(error.__cause__).__name__), patch.object(
+                build_repo, "run_capture", side_effect=[pages, b"[[]]"]
+            ), patch.object(build_repo, "download_previous_index", side_effect=error) as index:
+                build_repo.verify_initialization_target(
+                    "gh", "DobbyVPN/DobbyVPN", previous_url, self.config["fingerprint"], {}
+                )
+                index.assert_called_once_with(previous_url, self.config["fingerprint"])
+
+    def test_initialize_does_not_bypass_other_index_failures(self) -> None:
+        entry_url = f"{self.config['repo_url']}/entry.jar"
+        index_url = f"{self.config['repo_url']}/index-v2.json"
+        errors = [
+            wrap_index_error(http_error(index_url, 404)),
+            wrap_index_error(http_error(entry_url, 500)),
+            wrap_index_error(hostname_error(index_url)),
+            wrap_index_error(hostname_error(entry_url, verify_code=10)),
+            wrap_index_error(ValueError("repository fingerprint mismatch")),
+            wrap_index_error(json.JSONDecodeError("bad index JSON", "not JSON", 0)),
+        ]
+        for error in errors:
+            with self.subTest(cause=type(error.__cause__).__name__), patch.object(
+                build_repo, "run_capture", side_effect=[json.dumps({"status": None}).encode(), b"[[]]"]
+            ), patch.object(build_repo, "download_previous_index", side_effect=error):
+                with self.assertRaises(build_repo.RepoError) as raised:
+                    build_repo.verify_initialization_target(
+                        "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+                    )
+                self.assertIs(raised.exception, error)
 
     def test_initialize_allows_two_failed_attempts_with_explicitly_skipped_deploy_step(self) -> None:
         pages = json.dumps({"status": None}).encode()
@@ -128,13 +209,14 @@ class BuildRepoTests(unittest.TestCase):
             status("102"),
             job("102"),
         ]) as command, patch.object(build_repo, "download_previous_index") as index:
+            index.return_value = {"packages": {}}
             build_repo.verify_initialization_target(
                 "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
             )
             self.assertEqual(command.call_count, 6)
             self.assertIn("actions/jobs/1101", command.call_args_list[3].args[0][-1])
             self.assertIn("actions/jobs/1102", command.call_args_list[5].args[0][-1])
-            index.assert_not_called()
+            index.assert_called_once()
 
     def test_initialize_paginates_past_new_deployments_before_accepting_history(self) -> None:
         pages = json.dumps({"status": None}).encode()
@@ -159,13 +241,14 @@ class BuildRepoTests(unittest.TestCase):
                 "steps": [{"name": "Deploy repository", "conclusion": "skipped"}],
             }).encode(),
             json.dumps([successful_status]).encode(),
-        ]) as command, patch.object(
-            build_repo, "download_previous_index", return_value={"packages": {build_repo.APP_ID: {}}}
-        ) as index:
-            with self.assertRaisesRegex(build_repo.RepoError, "contains packages"):
+        ]) as command, patch.object(build_repo, "download_previous_index", side_effect=wrap_index_error(
+            http_error(f"{self.config['repo_url']}/entry.jar", 404)
+        )) as index:
+            with self.assertRaises(build_repo.RepoError) as raised:
                 build_repo.verify_initialization_target(
                     "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
                 )
+            self.assertIs(raised.exception, index.side_effect)
             self.assertIn("--paginate", command.call_args_list[1].args[0])
             self.assertIn("per_page=100", command.call_args_list[1].args[0][-1])
             index.assert_called_once()
@@ -185,6 +268,16 @@ class BuildRepoTests(unittest.TestCase):
             "conclusion": "failure",
             "steps": [{"name": "Deploy repository", "conclusion": "success"}],
         }).encode()
+        absent_entry = wrap_index_error(http_error(f"{self.config['repo_url']}/entry.jar", 404))
+        with patch.object(build_repo, "run_capture", side_effect=[pages, deployments, statuses, job]), \
+             patch.object(build_repo, "download_previous_index", side_effect=absent_entry) as index:
+            with self.assertRaises(build_repo.RepoError) as raised:
+                build_repo.verify_initialization_target(
+                    "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
+                )
+            self.assertIs(raised.exception, absent_entry)
+            index.assert_called_once()
+
         with patch.object(build_repo, "run_capture", side_effect=[pages, deployments, statuses, job]), \
              patch.object(
                  build_repo, "download_previous_index", return_value={"packages": {build_repo.APP_ID: {}}}
@@ -225,18 +318,20 @@ class BuildRepoTests(unittest.TestCase):
             command.assert_not_called()
 
     def test_initialize_reports_malformed_native_history_if_index_verification_fails(self) -> None:
+        index_error = build_repo.RepoError("index TLS/signature failure")
         with patch.object(build_repo, "run_capture", side_effect=[
             json.dumps({"status": None}).encode(), b"not JSON",
         ]), patch.object(
-            build_repo, "download_previous_index", side_effect=build_repo.RepoError("index TLS/signature failure")
+            build_repo, "download_previous_index", side_effect=index_error
         ) as index:
             with self.assertRaisesRegex(
                 build_repo.RepoError,
                 "deployment history API did not return valid JSON; index TLS/signature failure",
-            ):
+            ) as raised:
                 build_repo.verify_initialization_target(
                     "gh", "DobbyVPN/DobbyVPN", self.config["repo_url"], self.config["fingerprint"], {}
                 )
+            self.assertIs(raised.exception.__cause__, index_error)
             index.assert_called_once()
 
     def test_release_asset_allowlist_rejects_unexpected_files(self) -> None:

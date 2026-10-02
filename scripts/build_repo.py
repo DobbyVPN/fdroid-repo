@@ -12,13 +12,14 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import traceback
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from urllib.request import urlopen
 
 APP_ID = "com.dobby.vpn"
@@ -472,6 +473,49 @@ def download_previous_index(previous_url: str, fingerprint: str) -> Any:
     return index_v2
 
 
+def _is_unpublished_entry_jar_error(error: RepoError, previous_url: str) -> bool:
+    parsed_url = urlsplit(previous_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        return False
+    entry_url = urlunsplit((
+        parsed_url.scheme,
+        parsed_url.netloc,
+        f"{parsed_url.path.rstrip('/')}/entry.jar",
+        "",
+        "",
+    ))
+    try:
+        import requests
+        from urllib3.exceptions import MaxRetryError, SSLError as Urllib3SSLError
+    except ImportError:
+        return False
+
+    cause = error.__cause__
+    if isinstance(cause, requests.exceptions.HTTPError):
+        response = cause.response
+        return (
+            response is not None
+            and response.status_code == 404
+            and response.url == entry_url
+        )
+    if not isinstance(cause, requests.exceptions.SSLError):
+        return False
+    request = cause.request
+    if request is None or request.url != entry_url or len(cause.args) != 1:
+        return False
+    retry_error = cause.args[0]
+    if not isinstance(retry_error, MaxRetryError):
+        return False
+    transport_error = retry_error.reason
+    if not isinstance(transport_error, Urllib3SSLError) or len(transport_error.args) != 1:
+        return False
+    certificate_error = transport_error.args[0]
+    return (
+        isinstance(certificate_error, ssl.SSLCertVerificationError)
+        and getattr(certificate_error, "verify_code", None) == 62
+    )
+
+
 def _slurped_api_collection(raw: bytes, description: str) -> list[Any]:
     try:
         pages = json.loads(raw.decode("utf-8"))
@@ -549,7 +593,7 @@ def _history_proves_unpublished(
 def verify_initialization_target(
     gh: str, github_repo: str, previous_url: str, fingerprint: str, env: dict[str, str]
 ) -> None:
-    """Permit first Pages activation or a verified, already-empty repo only."""
+    """Initialize only after an empty signed index or a proven Pages bootstrap absence."""
     if github_repo != "DobbyVPN/DobbyVPN":
         raise RepoError("Pages must be hosted on DobbyVPN/DobbyVPN")
     raw = run_capture([gh, "api", f"repos/{github_repo}/pages"], env=env)
@@ -567,17 +611,19 @@ def verify_initialization_target(
         first_activation = _history_proves_unpublished(gh, github_repo, env)
     except RepoError as error:
         # Incomplete or malformed native history cannot authorize activation;
-        # a valid signed index can still prove the public repository is empty.
+        # only a verified empty index can still authorize initialization.
         first_activation = False
         history_error = error
-    if status is None and first_activation:
-        return
     try:
         index_v2 = download_previous_index(previous_url, fingerprint)
     except RepoError as error:
+        if status is None and first_activation and _is_unpublished_entry_jar_error(error, previous_url):
+            return
         if history_error is not None:
             raise RepoError(f"{history_error}; {error}") from error
         raise
+    if not isinstance(index_v2, dict):
+        raise RepoError("existing public repository has a malformed signed index")
     packages = index_v2.get("packages")
     if not isinstance(packages, dict):
         raise RepoError("existing public repository has a malformed signed package index")
