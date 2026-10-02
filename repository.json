@@ -1,0 +1,7 @@
+{
+  "repo_url": "https://f-repo.dobbyvpn.com/fdroid/repo",
+  "repo_name": "DobbyVPN",
+  "repo_description": "Official DobbyVPN Android releases.",
+  "key_alias": "dobbyvpn-fdroid",
+  "fingerprint": "f22f23e62c095beed3a71c4b0d69c7f3a768e52dfe6a83aaf6a2e6ab9e2fedc4"
+}

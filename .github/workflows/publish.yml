@@ -1,0 +1,179 @@
+name: Publish F-Droid repository
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Selected product source revision.
+        required: true
+        type: string
+      tag:
+        required: false
+        type: string
+      release_run_id:
+        required: false
+        type: string
+      release_run_number:
+        required: false
+        type: string
+      initialize:
+        description: Prepare an empty signed catalog without publishing an app.
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: fdroid-pages-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Sign, deploy, and verify F-Droid catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Read reusable workflow source identity
+        id: workflow
+        env:
+          WORKFLOW_JOB: ${{ toJSON(job) }}
+        # Actionlint 1.7.12 predates job.workflow_sha; read the documented
+        # identity from the job JSON so checkout follows the caller's one pin.
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          job = json.loads(os.environ["WORKFLOW_JOB"])
+          assert job["workflow_repository"] == "DobbyVPN/fdroid-repo"
+          sha = job["workflow_sha"]
+          assert re.fullmatch(r"[0-9a-f]{40}", sha)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"source_sha={sha}\n")
+          PY
+      - name: Check out pinned publisher
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: DobbyVPN/fdroid-repo
+          ref: ${{ steps.workflow.outputs.source_sha }}
+          path: publisher
+          persist-credentials: false
+      - name: Check out selected product source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: DobbyVPN/DobbyVPN
+          ref: ${{ inputs.source_sha }}
+          path: product
+          persist-credentials: false
+      - name: Verify caller and source revisions
+        env:
+          PUBLISHER_SHA: ${{ steps.workflow.outputs.source_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = DobbyVPN/DobbyVPN
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$PUBLISHER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C publisher rev-parse HEAD)" = "$PUBLISHER_SHA"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE_SHA"
+      - name: Read Android tool versions
+        id: pins
+        run: |
+          set -euo pipefail
+          for pin in java_major android_build_tools; do
+            value="$(python3 product/.github/scripts/android/android_dependency_provenance.py --print-pin "$pin")"
+            echo "$pin=$value" >> "$GITHUB_OUTPUT"
+          done
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          java-version: ${{ steps.pins.outputs.java_major }}
+          distribution: temurin
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+        with:
+          packages: build-tools;${{ steps.pins.outputs.android_build_tools }}
+      - name: Install repository tools
+        run: python -m pip install --no-cache-dir -r publisher/requirements.txt
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Build and verify signed public files
+        id: catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FDROID_REPO_KEYSTORE: ${{ secrets.FDROID_REPO_KEYSTORE }}
+          FDROID_KEYSTORE_PASSWORD: ${{ secrets.FDROID_KEYSTORE_PASSWORD }}
+          FDROID_KEY_PASSWORD: ${{ secrets.FDROID_KEY_PASSWORD }}
+          INITIALIZE: ${{ inputs.initialize }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          RELEASE_RUN_NUMBER: ${{ inputs.release_run_number }}
+          BUILD_TOOLS: ${{ steps.pins.outputs.android_build_tools }}
+        run: |
+          set -euo pipefail
+          umask 077
+          private_dir="$RUNNER_TEMP/fdroid-private"
+          mkdir "$private_dir"
+          trap 'rm -rf "$private_dir"' EXIT
+          test -n "$FDROID_REPO_KEYSTORE"
+          printf '%s' "$FDROID_REPO_KEYSTORE" | base64 --decode > "$private_dir/repository.keystore"
+          alias="$(python -c 'import json; print(json.load(open("publisher/repository.json"))["key_alias"])')"
+          args=(--output "$RUNNER_TEMP/fdroid-site" --keystore "$private_dir/repository.keystore" --alias "$alias")
+          if [[ "$INITIALIZE" == true ]]; then
+            args+=(--initialize)
+          else
+            sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+            args+=(--release --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
+              --release-run-id "$RELEASE_RUN_ID" --release-run-number "$RELEASE_RUN_NUMBER"
+              --product-repo "$GITHUB_WORKSPACE/product"
+              --apksigner "$sdk_root/build-tools/$BUILD_TOOLS/apksigner"
+              --apkanalyzer "$(command -v apkanalyzer)")
+          fi
+          python publisher/scripts/build_repo.py "${args[@]}"
+          if [[ "$INITIALIZE" != true ]]; then
+            python - "$RUNNER_TEMP/fdroid-site/fdroid/repo/index-v2.json" "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          versions = json.load(open(sys.argv[1]))["packages"]["com.dobby.vpn"]["versions"].values()
+          newest = max(versions, key=lambda v: v["manifest"]["versionCode"])
+          with open(sys.argv[2], "a") as output:
+              output.write(f'version_code={newest["manifest"]["versionCode"]}\n')
+              output.write(f'apk_sha256={newest["file"]["sha256"]}\n')
+          PY
+          fi
+      - name: Upload public Pages files
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/fdroid-site
+          retention-days: 7
+      - name: Deploy repository
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+      - name: Verify publicly served catalog and onboarding
+        env:
+          INITIALIZE: ${{ inputs.initialize }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION_CODE: ${{ steps.catalog.outputs.version_code }}
+          APK_SHA256: ${{ steps.catalog.outputs.apk_sha256 }}
+          BUILD_TOOLS: ${{ steps.pins.outputs.android_build_tools }}
+        run: |
+          set -euo pipefail
+          if [[ "$INITIALIZE" == true ]]; then
+            python publisher/scripts/verify_public_repo.py --expect-empty
+          else
+            sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+            python publisher/scripts/verify_public_repo.py --expect-version "${RELEASE_TAG#v}" \
+              --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
+              --version-code "$VERSION_CODE" --apk-sha256 "$APK_SHA256" \
+              --product-repo "$GITHUB_WORKSPACE/product" \
+              --apksigner "$sdk_root/build-tools/$BUILD_TOOLS/apksigner" \
+              --apkanalyzer "$(command -v apkanalyzer)"
+          fi

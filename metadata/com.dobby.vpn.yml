@@ -1,0 +1,20 @@
+Categories:
+  - Security
+License: BUSL-1.1
+AuthorName: DobbyVPN
+SourceCode: https://github.com/DobbyVPN/DobbyVPN
+IssueTracker: https://github.com/DobbyVPN/DobbyVPN/issues
+Name: DobbyVPN
+Summary: VPN client for Outline, Xray, and TrustTunnel configurations
+Description: |-
+  DobbyVPN is a VPN client for Outline, Xray, and TrustTunnel configurations.
+  It supports Android phones and offers a native Android interface.
+  The app is distributed by the DobbyVPN project as a signed binary.
+
+  This repository contains official signed releases. F-Droid does not build
+  these APKs from source.
+CurrentVersion: 1.5.2
+CurrentVersionCode: 1005002
+AllowedAPKSigningKeys: c3f0414a74012060d7c6aa3a3d9dac0aa13c1bd23b7512eefd860fb865e67933
+ArchivePolicy: 3
+UpdateCheckMode: Static

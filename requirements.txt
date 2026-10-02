@@ -1,0 +1,2 @@
+fdroidserver==2.4.5
+qrcode==8.2

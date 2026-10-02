@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+body { margin: 0; background: #101820; color: #f4f7fa; }
+main { box-sizing: border-box; max-width: 42rem; margin: 0 auto; padding: 3rem 1.5rem; text-align: center; }
+h1 { font-size: clamp(2rem, 6vw, 3.2rem); line-height: 1.1; }
+.logo { width: 5rem; height: 5rem; }
+.button { display: inline-block; padding: .8rem 1.25rem; border-radius: .5rem; background: #3b82f6; color: white; font-weight: 700; text-decoration: none; }
+.repo-url { overflow-wrap: anywhere; }
+.qr { width: 15rem; height: 15rem; padding: .75rem; background: white; }
+code { overflow-wrap: anywhere; }
