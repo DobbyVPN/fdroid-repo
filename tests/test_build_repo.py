@@ -388,6 +388,28 @@ class BuildRepoTests(unittest.TestCase):
             with self.assertRaisesRegex(build_repo.RepoError, "unexpected files"):
                 build_repo.assert_release_files(directory, expected)
 
+    def test_release_asset_allowlist_accepts_only_the_signed_apk_idsig_sidecar(self) -> None:
+        expected = build_repo.expected_release_assets("1.5.2")
+        signed_apk = next(name for name in expected if name.endswith("-sign.apk"))
+        optional_sidecar = f"{signed_apk}.idsig"
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for name in expected:
+                (directory / name).touch()
+            (directory / "release-provenance.json").touch()
+            (directory / optional_sidecar).write_bytes(b"untrusted optional v4 sidecar")
+            build_repo.assert_release_files(directory, expected)
+
+            (directory / optional_sidecar).unlink()
+            (directory / "other.apk.idsig").touch()
+            with self.assertRaisesRegex(build_repo.RepoError, "unexpected files"):
+                build_repo.assert_release_files(directory, expected)
+
+            (directory / "other.apk.idsig").unlink()
+            (directory / optional_sidecar).symlink_to(directory / signed_apk)
+            with self.assertRaisesRegex(build_repo.RepoError, "symlinks"):
+                build_repo.assert_release_files(directory, expected)
+
     def test_production_signer_mismatch_is_rejected(self) -> None:
         wrong_digest = b"0" * 64
         output = b"Signer #1 certificate SHA-256 digest: " + wrong_digest + b"\n"

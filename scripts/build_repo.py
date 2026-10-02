@@ -258,14 +258,21 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
 
 def assert_release_files(directory: Path, expected_assets: Iterable[str]) -> None:
     expected = set(expected_assets) | {"release-provenance.json"}
+    optional = {
+        f"{name}.idsig" for name in expected if name.endswith("-sign.apk")
+    }
     children = list(directory.iterdir())
     symlinks = [path.name for path in children if path.is_symlink()]
     actual = {path.name for path in children if path.is_file()}
     directories = [path.name for path in children if path.is_dir()]
-    if symlinks or directories or actual != expected:
+    missing = expected - actual
+    unexpected = actual - expected - optional
+    if symlinks or directories or missing or unexpected:
         raise RepoError(
             "GitHub Release contains unexpected files: "
-            f"expected {sorted(expected)}, found files {sorted(actual)}, directories {sorted(directories)}, "
+            f"expected required files {sorted(expected)} with optional {sorted(optional)}, "
+            f"found files {sorted(actual)}, missing files {sorted(missing)}, "
+            f"unexpected files {sorted(unexpected)}, directories {sorted(directories)}, "
             f"and symlinks {sorted(symlinks)}"
         )
 
