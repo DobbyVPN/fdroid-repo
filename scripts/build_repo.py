@@ -239,7 +239,17 @@ def validate_selected_run(
 
 
 def expected_release_assets(version: str) -> list[str]:
-    return sorted(name.format(version=version) for name in RELEASE_ASSET_NAMES)
+    names = list(RELEASE_ASSET_NAMES)
+    if tuple(map(int, version.split("."))) >= (1, 5, 3):
+        names.extend((
+            "DobbyVPN-v{version}-debug.apk",
+            "DobbyVPN.xcarchive-debug.tar.gz",
+            "dobbyVPN-linux-debug.deb",
+            "dobbyVPN-macos-aarch64-debug.pkg",
+            "dobbyVPN-macos-amd64-debug.pkg",
+            "dobbyVPN-windows-amd64-debug.msi",
+        ))
+    return sorted(name.format(version=version) for name in names)
 
 
 def add_repository_url(config: dict[str, str]) -> str:

@@ -376,6 +376,22 @@ class BuildRepoTests(unittest.TestCase):
             self.assertIs(raised.exception.__cause__, index_error)
             index.assert_called_once()
 
+    def test_debug_packages_are_required_only_from_153(self) -> None:
+        old = build_repo.expected_release_assets("1.5.2")
+        self.assertFalse(any("-debug" in name for name in old))
+        for version in ("1.5.3", "1.5.10", "1.6.0", "2.0.0"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
+                expected = build_repo.expected_release_assets(version)
+                debug = [name for name in expected if "-debug" in name]
+                self.assertEqual(len(debug), 6)
+                directory = Path(raw)
+                for name in (*expected, "release-provenance.json"):
+                    (directory / name).touch()
+                build_repo.assert_release_files(directory, expected)
+                (directory / debug[0]).unlink()
+                with self.assertRaisesRegex(build_repo.RepoError, "missing files"):
+                    build_repo.assert_release_files(directory, expected)
+
     def test_release_asset_allowlist_rejects_unexpected_files(self) -> None:
         expected = build_repo.expected_release_assets("1.5.2")
         with tempfile.TemporaryDirectory() as raw:
