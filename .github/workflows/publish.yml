@@ -10,10 +10,40 @@ on:
       tag:
         required: false
         type: string
-      release_run_id:
+      build_run_id:
+        description: Selected immutable Build workflow run ID.
         required: false
         type: string
-      release_run_number:
+      build_run_number:
+        required: false
+        type: string
+      test_run_id:
+        description: Selected successful Test workflow run ID.
+        required: false
+        type: string
+      test_run_number:
+        required: false
+        type: string
+      publish_run_id:
+        description: Selected successful Publish workflow run ID.
+        required: false
+        type: string
+      publish_run_number:
+        required: false
+        type: string
+      android_version_code:
+        required: false
+        type: string
+      apple_build_number:
+        required: false
+        type: string
+      build_manifest_sha256:
+        required: false
+        type: string
+      test_result_sha256:
+        required: false
+        type: string
+      release_notes_sha256:
         required: false
         type: string
       initialize:
@@ -124,8 +154,17 @@ jobs:
           INITIALIZE: ${{ inputs.initialize }}
           RELEASE_TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
-          RELEASE_RUN_NUMBER: ${{ inputs.release_run_number }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          BUILD_RUN_NUMBER: ${{ inputs.build_run_number }}
+          TEST_RUN_ID: ${{ inputs.test_run_id }}
+          TEST_RUN_NUMBER: ${{ inputs.test_run_number }}
+          PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          PUBLISH_RUN_NUMBER: ${{ inputs.publish_run_number }}
+          ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
+          APPLE_BUILD_NUMBER: ${{ inputs.apple_build_number }}
+          BUILD_MANIFEST_SHA256: ${{ inputs.build_manifest_sha256 }}
+          TEST_RESULT_SHA256: ${{ inputs.test_result_sha256 }}
+          RELEASE_NOTES_SHA256: ${{ inputs.release_notes_sha256 }}
           BUILD_TOOLS: ${{ steps.pins.outputs.android_build_tools }}
         run: |
           set -euo pipefail
@@ -144,7 +183,13 @@ jobs:
           else
             sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
             args+=(--release --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
-              --release-run-id "$RELEASE_RUN_ID" --release-run-number "$RELEASE_RUN_NUMBER"
+              --build-run-id "$BUILD_RUN_ID" --build-run-number "$BUILD_RUN_NUMBER"
+              --test-run-id "$TEST_RUN_ID" --test-run-number "$TEST_RUN_NUMBER"
+              --publish-run-id "$PUBLISH_RUN_ID" --publish-run-number "$PUBLISH_RUN_NUMBER"
+              --android-version-code "$ANDROID_VERSION_CODE" --apple-build-number "$APPLE_BUILD_NUMBER"
+              --build-manifest-sha256 "$BUILD_MANIFEST_SHA256"
+              --test-result-sha256 "$TEST_RESULT_SHA256"
+              --release-notes-sha256 "$RELEASE_NOTES_SHA256"
               --product-repo "$GITHUB_WORKSPACE/product"
               --apksigner "$sdk_root/build-tools/$BUILD_TOOLS/apksigner"
               --apkanalyzer "$(command -v apkanalyzer)")

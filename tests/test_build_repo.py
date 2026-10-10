@@ -43,32 +43,43 @@ class BuildRepoTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = build_repo.load_repository_config(REPO_ROOT / "repository.json")
 
-    def test_selected_run_uses_gh_number_field_and_preserves_release_checks(self) -> None:
+    def test_selected_run_checks_exact_workflow_branch_source_and_first_attempt(self) -> None:
         run = {
-            "databaseId": 37029487478,
-            "number": 2260,
-            "headSha": "553076bad4f28d36fd848a869ddd1359e6dbb285",
-            "workflowName": "Release",
+            "id": 37029487478,
+            "run_number": 2260,
+            "head_sha": "553076bad4f28d36fd848a869ddd1359e6dbb285",
+            "path": ".github/workflows/build.yml@refs/heads/main",
+            "head_branch": "main",
+            "event": "workflow_dispatch",
             "status": "completed",
             "conclusion": "success",
+            "run_attempt": 1,
+            "repository": {"full_name": "DobbyVPN/DobbyVPN"},
         }
-        expected_fields = "databaseId,number,headSha,workflowName,status,conclusion"
         with patch.object(build_repo, "run_capture", return_value=json.dumps(run).encode()) as command:
             build_repo.validate_selected_run(
                 "gh", "DobbyVPN/DobbyVPN", 37029487478, 2260,
-                "553076bad4f28d36fd848a869ddd1359e6dbb285", {},
+                "553076bad4f28d36fd848a869ddd1359e6dbb285", "Build", {},
             )
-            self.assertEqual(command.call_args.args[0][-1], expected_fields)
+            self.assertEqual(command.call_args.args[0][-1], "repos/DobbyVPN/DobbyVPN/actions/runs/37029487478")
 
         for field, value in run.items():
-            if field == "number":
+            if field == "run_number":
                 wrong_value = value + 1
-            elif field == "databaseId":
+            elif field == "id":
                 wrong_value = value + 1
-            elif field == "headSha":
+            elif field == "head_sha":
                 wrong_value = "a" * 40
-            elif field == "workflowName":
-                wrong_value = "Other"
+            elif field == "path":
+                wrong_value = ".github/workflows/publish.yml@refs/heads/main"
+            elif field == "head_branch":
+                wrong_value = "feature"
+            elif field == "repository":
+                wrong_value = {"full_name": "someone/else"}
+            elif field == "run_attempt":
+                wrong_value = 2
+            elif field == "event":
+                wrong_value = "push"
             elif field == "status":
                 wrong_value = "in_progress"
             else:
@@ -78,12 +89,24 @@ class BuildRepoTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     build_repo.RepoError,
-                    "successful Release for this source SHA",
+                    "successful Build for this release lineage",
                 ):
                     build_repo.validate_selected_run(
                         "gh", "DobbyVPN/DobbyVPN", 37029487478, 2260,
-                        "553076bad4f28d36fd848a869ddd1359e6dbb285", {},
+                        "553076bad4f28d36fd848a869ddd1359e6dbb285", "Build", {},
                     )
+
+        for workflow, path, attempt in (
+            ("Test", ".github/workflows/test.yml@refs/heads/main", 1),
+            ("Publish", ".github/workflows/publish.yml@refs/heads/main", 2),
+        ):
+            with self.subTest(workflow=workflow), patch.object(
+                build_repo, "run_capture", return_value=json.dumps({**run, "path": path, "run_attempt": attempt}).encode()
+            ):
+                build_repo.validate_selected_run(
+                    "gh", "DobbyVPN/DobbyVPN", 37029487478, 2260,
+                    "553076bad4f28d36fd848a869ddd1359e6dbb285", workflow, {},
+                )
 
     def test_add_link_uses_fdroid_syntax_and_repository_fingerprint(self) -> None:
         url = build_repo.add_repository_url(self.config)
@@ -93,13 +116,18 @@ class BuildRepoTests(unittest.TestCase):
             + self.config["fingerprint"].upper(),
         )
 
-    def test_selected_release_provenance_rejects_wrong_source_and_run(self) -> None:
+    def test_selected_publish_provenance_rejects_wrong_source_and_run(self) -> None:
         validators = build_repo.load_product_validators(REPO_ROOT.parent / "DobbyVPN")
         version = "1.5.2"
         version_code = 1_005_002
         source_sha = "a" * 40
-        run_id = 123
-        run_number = 45
+        build_run_id = 123
+        build_run_number = 45
+        test_run_id = 234
+        test_run_number = 47
+        publish_run_id = 345
+        publish_run_number = 55
+        apple_build_number = version_code + build_run_number
         assets = build_repo.expected_release_assets(version)
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -109,36 +137,60 @@ class BuildRepoTests(unittest.TestCase):
                     path.write_text(f"versionCode={version_code}\nversionName={version}\n", encoding="utf-8")
                 else:
                     path.write_bytes(name.encode("utf-8"))
-            validators.release_provenance.create_manifest(
+            validators.release_provenance.create_published_manifest(
                 directory,
                 tag=f"v{version}",
                 version=version,
                 source_sha=source_sha,
-                release_run_id=run_id,
-                release_run_number=run_number,
+                build_run_id=build_run_id,
+                build_run_number=build_run_number,
+                test_run_id=test_run_id,
+                test_run_number=test_run_number,
+                publish_run_id=publish_run_id,
+                publish_run_number=publish_run_number,
                 android_version_code=version_code,
+                apple_build_number=apple_build_number,
+                build_manifest_sha256="b" * 64,
+                test_result_sha256="c" * 64,
+                release_notes_sha256="d" * 64,
                 assets=assets,
             )
             with self.assertRaises(validators.release_provenance.ProvenanceError):
-                validators.release_provenance.verify_manifest(
+                validators.release_provenance.verify_published_manifest(
                     directory,
                     tag=f"v{version}",
                     version=version,
                     source_sha="b" * 40,
-                    release_run_id=run_id,
-                    release_run_number=run_number,
+                    build_run_id=build_run_id,
+                    build_run_number=build_run_number,
+                    test_run_id=test_run_id,
+                    test_run_number=test_run_number,
+                    publish_run_id=publish_run_id,
+                    publish_run_number=publish_run_number,
                     android_version_code=version_code,
+                    apple_build_number=apple_build_number,
+                    build_manifest_sha256="b" * 64,
+                    test_result_sha256="c" * 64,
+                    release_notes_sha256="d" * 64,
                     assets=assets,
                 )
             with self.assertRaises(validators.release_provenance.ProvenanceError):
-                validators.release_provenance.verify_manifest(
+                validators.release_provenance.verify_published_manifest(
                     directory,
                     tag=f"v{version}",
                     version=version,
                     source_sha=source_sha,
-                    release_run_id=run_id + 1,
-                    release_run_number=run_number,
+                    build_run_id=build_run_id,
+                    build_run_number=build_run_number,
+                    test_run_id=test_run_id,
+                    test_run_number=test_run_number,
+                    publish_run_id=publish_run_id + 1,
+                    publish_run_number=publish_run_number,
                     android_version_code=version_code,
+                    apple_build_number=apple_build_number,
+                    build_manifest_sha256="b" * 64,
+                    test_result_sha256="c" * 64,
+                    release_notes_sha256="d" * 64,
                     assets=assets,
                 )
 

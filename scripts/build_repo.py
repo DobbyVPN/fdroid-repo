@@ -36,6 +36,12 @@ RELEASE_ASSET_NAMES = (
     "dobbyVPN-macos-aarch64.pkg",
     "dobbyVPN-macos-amd64.pkg",
     "dobbyVPN-windows-amd64.msi",
+    "dobbyVPN-linux-debug.deb",
+    "dobbyVPN-windows-amd64-debug.msi",
+    "dobbyVPN-macos-aarch64-debug.pkg",
+    "dobbyVPN-macos-amd64-debug.pkg",
+    "DobbyVPN.xcarchive-debug.tar.gz",
+    "DobbyVPN-v{version}-debug.apk",
 )
 SITE_ROOT_FILES = {"repository.json", "index.html"}
 SITE_ASSETS = {"assets/add-to-fdroid.svg", "assets/dobbyvpn.png", "assets/site.css"}
@@ -151,8 +157,17 @@ def verify_immutable_repository_key(
 def add_release_assets(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tag", required=True, help="stable GitHub Release tag, e.g. v1.2.3")
     parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--release-run-id", type=positive_integer, required=True)
-    parser.add_argument("--release-run-number", type=positive_integer, required=True)
+    parser.add_argument("--build-run-id", type=positive_integer, required=True)
+    parser.add_argument("--build-run-number", type=positive_integer, required=True)
+    parser.add_argument("--test-run-id", type=positive_integer, required=True)
+    parser.add_argument("--test-run-number", type=positive_integer, required=True)
+    parser.add_argument("--publish-run-id", type=positive_integer, required=True)
+    parser.add_argument("--publish-run-number", type=positive_integer, required=True)
+    parser.add_argument("--android-version-code", type=positive_integer, required=True)
+    parser.add_argument("--apple-build-number", type=positive_integer, required=True)
+    parser.add_argument("--build-manifest-sha256", required=True)
+    parser.add_argument("--test-result-sha256", required=True)
+    parser.add_argument("--release-notes-sha256", required=True)
     parser.add_argument("--product-repo", type=Path, required=True, help="DobbyVPN checkout at the selected source SHA")
     parser.add_argument("--previous-url", help="public F-Droid repo URL to read the current signed index from; defaults to repository.json")
 
@@ -202,7 +217,7 @@ def product_repository_slug(product_repo: Path) -> str:
 def selected_product_metadata(product_repo: Path, source_sha: str, tag: str, validators: Any) -> tuple[str, int]:
     actual_sha = run_capture(["git", "-C", str(product_repo), "rev-parse", "HEAD"]).decode().strip()
     if actual_sha != source_sha:
-        raise RepoError("product checkout HEAD does not match selected Release source SHA")
+        raise RepoError("product checkout HEAD does not match selected Build source SHA")
     if not SOURCE_SHA_RE.fullmatch(source_sha):
         raise RepoError("source SHA must be a full lowercase 40-character Git SHA")
     try:
@@ -210,32 +225,48 @@ def selected_product_metadata(product_repo: Path, source_sha: str, tag: str, val
     except (OSError, ValueError) as error:
         raise RepoError(f"selected product VERSION is invalid: {error}") from error
     if tag != f"v{version.version_name}" or not TAG_RE.fullmatch(tag):
-        raise RepoError("selected Release tag does not match the product VERSION")
+        raise RepoError("selected Publish tag does not match the product VERSION")
     return version.version_name, version.android_version_code
 
 
+def _workflow_path_matches(value: Any, expected: str) -> bool:
+    return isinstance(value, str) and (value == expected or value.startswith(expected + "@"))
+
+
 def validate_selected_run(
-    gh: str, github_repo: str, run_id: int, run_number: int, source_sha: str, env: dict[str, str]
+    gh: str, github_repo: str, run_id: int, run_number: int, source_sha: str,
+    workflow: str, env: dict[str, str],
 ) -> None:
-    raw = run_capture(
-        [gh, "run", "view", str(run_id), "--repo", github_repo,
-         "--json", "databaseId,number,headSha,workflowName,status,conclusion"],
-        env=env,
-    )
+    workflow_paths = {
+        "Build": ".github/workflows/build.yml",
+        "Test": ".github/workflows/test.yml",
+        "Publish": ".github/workflows/publish.yml",
+    }
+    if workflow not in workflow_paths:
+        raise RepoError(f"unsupported selected workflow identity: {workflow}")
+    raw = run_capture([gh, "api", f"repos/{github_repo}/actions/runs/{run_id}"], env=env)
     try:
         run = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise RepoError("GitHub Actions did not return valid selected Release run metadata") from error
+        raise RepoError(f"GitHub Actions did not return valid selected {workflow} run metadata") from error
     expected = {
-        "databaseId": run_id,
-        "number": run_number,
-        "headSha": source_sha,
-        "workflowName": "Release",
+        "id": run_id,
+        "run_number": run_number,
+        "head_branch": "main",
+        "event": "workflow_dispatch",
         "status": "completed",
         "conclusion": "success",
     }
-    if not isinstance(run, dict) or any(run.get(key) != value for key, value in expected.items()):
-        raise RepoError("selected GitHub Actions run must be the successful Release for this source SHA")
+    repo = run.get("repository") if isinstance(run, dict) else None
+    invalid = not isinstance(run, dict) or any(run.get(key) != value for key, value in expected.items())
+    invalid = invalid or not isinstance(repo, dict) or repo.get("full_name") != github_repo
+    invalid = invalid or not _workflow_path_matches(run.get("path") if isinstance(run, dict) else None, workflow_paths[workflow])
+    if isinstance(run, dict):
+        invalid = invalid or type(run.get("run_attempt")) is not int or run["run_attempt"] < 1
+    if workflow in {"Build", "Test"}:
+        invalid = invalid or run.get("run_attempt") != 1 or run.get("head_sha") != source_sha
+    if invalid:
+        raise RepoError(f"selected GitHub Actions run must be the successful {workflow} for this release lineage")
 
 
 def expected_release_assets(version: str) -> list[str]:
@@ -293,9 +324,17 @@ def verify_release_directory(
     tag: str,
     version: str,
     source_sha: str,
-    run_id: int,
-    run_number: int,
+    build_run_id: int,
+    build_run_number: int,
+    test_run_id: int,
+    test_run_number: int,
+    publish_run_id: int,
+    publish_run_number: int,
     version_code: int,
+    apple_build_number: int,
+    build_manifest_sha256: str,
+    test_result_sha256: str,
+    release_notes_sha256: str,
     validators: Any,
     apksigner: str,
     apkanalyzer: str,
@@ -304,14 +343,22 @@ def verify_release_directory(
 ) -> Path:
     assets = expected_release_assets(version)
     assert_release_files(directory, assets)
-    validators.release_provenance.verify_manifest(
+    validators.release_provenance.verify_published_manifest(
         directory,
         tag=tag,
         version=version,
         source_sha=source_sha,
-        release_run_id=run_id,
-        release_run_number=run_number,
+        build_run_id=build_run_id,
+        build_run_number=build_run_number,
+        test_run_id=test_run_id,
+        test_run_number=test_run_number,
+        publish_run_id=publish_run_id,
+        publish_run_number=publish_run_number,
         android_version_code=version_code,
+        apple_build_number=apple_build_number,
+        build_manifest_sha256=build_manifest_sha256,
+        test_result_sha256=test_result_sha256,
+        release_notes_sha256=release_notes_sha256,
         assets=assets,
     )
     signed = directory / f"DobbyVPN-v{version}-sign.apk"
@@ -1013,8 +1060,13 @@ def build_repository(args: argparse.Namespace) -> None:
     verify_immutable_repository_key(config, args.keystore, args.alias, args.keytool, env)
 
     if args.initialize:
-        if any(getattr(args, item, None) for item in ("tag", "source_sha", "release_run_id", "release_run_number", "product_repo")):
-            raise RepoError("--initialize cannot be combined with Release inputs")
+        release_inputs = (
+            "tag", "source_sha", "build_run_id", "build_run_number", "test_run_id", "test_run_number",
+            "publish_run_id", "publish_run_number", "android_version_code", "apple_build_number",
+            "build_manifest_sha256", "test_result_sha256", "release_notes_sha256", "product_repo",
+        )
+        if any(getattr(args, item, None) for item in release_inputs):
+            raise RepoError("--initialize cannot be combined with Publish inputs")
         github_repo = args.github_repo or env.get("GITHUB_REPOSITORY", "")
         verify_initialization_target(args.gh, github_repo, config["repo_url"], config["fingerprint"], env)
         ensure_empty_output(args.output)
@@ -1040,8 +1092,23 @@ def build_repository(args: argparse.Namespace) -> None:
     ensure_empty_output(args.output)
     validators = load_product_validators(args.product_repo)
     version, version_code = selected_product_metadata(args.product_repo, args.source_sha, args.tag, validators)
+    if args.android_version_code != version_code:
+        raise RepoError("selected Android version code does not match product VERSION")
+    if args.apple_build_number != args.android_version_code + args.build_run_number:
+        raise RepoError("selected Apple build number does not match Build run number and Android version code")
     github_repo = product_repository_slug(args.product_repo)
-    validate_selected_run(args.gh, github_repo, args.release_run_id, args.release_run_number, args.source_sha, env)
+    validate_selected_run(
+        args.gh, github_repo, args.build_run_id, args.build_run_number,
+        args.source_sha, "Build", env,
+    )
+    validate_selected_run(
+        args.gh, github_repo, args.test_run_id, args.test_run_number,
+        args.source_sha, "Test", env,
+    )
+    validate_selected_run(
+        args.gh, github_repo, args.publish_run_id, args.publish_run_number,
+        args.source_sha, "Publish", env,
+    )
 
     with tempfile.TemporaryDirectory(prefix="dobby-fdroid-build-") as raw_work:
         work = Path(raw_work)
@@ -1052,9 +1119,17 @@ def build_repository(args: argparse.Namespace) -> None:
             tag=args.tag,
             version=version,
             source_sha=args.source_sha,
-            run_id=args.release_run_id,
-            run_number=args.release_run_number,
+            build_run_id=args.build_run_id,
+            build_run_number=args.build_run_number,
+            test_run_id=args.test_run_id,
+            test_run_number=args.test_run_number,
+            publish_run_id=args.publish_run_id,
+            publish_run_number=args.publish_run_number,
             version_code=version_code,
+            apple_build_number=args.apple_build_number,
+            build_manifest_sha256=args.build_manifest_sha256,
+            test_result_sha256=args.test_result_sha256,
+            release_notes_sha256=args.release_notes_sha256,
             validators=validators,
             apksigner=args.apksigner,
             apkanalyzer=args.apkanalyzer,
