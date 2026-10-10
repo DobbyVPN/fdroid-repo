@@ -36,12 +36,6 @@ RELEASE_ASSET_NAMES = (
     "dobbyVPN-macos-aarch64.pkg",
     "dobbyVPN-macos-amd64.pkg",
     "dobbyVPN-windows-amd64.msi",
-    "dobbyVPN-linux-debug.deb",
-    "dobbyVPN-windows-amd64-debug.msi",
-    "dobbyVPN-macos-aarch64-debug.pkg",
-    "dobbyVPN-macos-amd64-debug.pkg",
-    "DobbyVPN.xcarchive-debug.tar.gz",
-    "DobbyVPN-v{version}-debug.apk",
 )
 SITE_ROOT_FILES = {"repository.json", "index.html"}
 SITE_ASSETS = {"assets/add-to-fdroid.svg", "assets/dobbyvpn.png", "assets/site.css"}
