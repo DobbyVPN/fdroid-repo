@@ -10,3 +10,6 @@ The repository fingerprint is published in [repository.json](repository.json)
 and on the website. Check it when adding the repository manually. These APKs
 are signed with DobbyVPN's Android release certificate and distributed under
 the Business Source License 1.1.
+
+Debug builds are available separately on GitHub Releases from version 1.5.3.
+This F-Droid repository distributes the production Android APK only.
