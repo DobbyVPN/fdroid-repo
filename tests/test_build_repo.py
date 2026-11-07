@@ -43,7 +43,7 @@ class BuildRepoTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = build_repo.load_repository_config(REPO_ROOT / "repository.json")
 
-    def test_selected_run_checks_exact_workflow_branch_source_and_first_attempt(self) -> None:
+    def test_selected_run_checks_exact_workflow_branch_source_and_valid_attempt(self) -> None:
         run = {
             "id": 37029487478,
             "run_number": 2260,
@@ -77,7 +77,7 @@ class BuildRepoTests(unittest.TestCase):
             elif field == "repository":
                 wrong_value = {"full_name": "someone/else"}
             elif field == "run_attempt":
-                wrong_value = 2
+                wrong_value = 0
             elif field == "event":
                 wrong_value = "push"
             elif field == "status":
@@ -97,7 +97,9 @@ class BuildRepoTests(unittest.TestCase):
                     )
 
         for workflow, path, attempt in (
+            ("Build", ".github/workflows/build.yml@refs/heads/main", 2),
             ("Test", ".github/workflows/test.yml@refs/heads/main", 1),
+            ("Test", ".github/workflows/test.yml@refs/heads/main", 2),
             ("Publish", ".github/workflows/publish.yml@refs/heads/main", 2),
         ):
             with self.subTest(workflow=workflow), patch.object(
@@ -107,6 +109,17 @@ class BuildRepoTests(unittest.TestCase):
                     "gh", "DobbyVPN/DobbyVPN", 37029487478, 2260,
                     "553076bad4f28d36fd848a869ddd1359e6dbb285", workflow, {},
                 )
+
+        for attempt in (None, True, "2", 0, -1):
+            with self.subTest(attempt=attempt), patch.object(
+                build_repo, "run_capture",
+                return_value=json.dumps({**run, "path": ".github/workflows/test.yml", "run_attempt": attempt}).encode(),
+            ):
+                with self.assertRaises(build_repo.RepoError):
+                    build_repo.validate_selected_run(
+                        "gh", "DobbyVPN/DobbyVPN", run["id"], run["run_number"],
+                        run["head_sha"], "Test", {},
+                    )
 
     def test_add_link_uses_fdroid_syntax_and_repository_fingerprint(self) -> None:
         url = build_repo.add_repository_url(self.config)
@@ -174,25 +187,26 @@ class BuildRepoTests(unittest.TestCase):
                     release_notes_sha256="d" * 64,
                     assets=assets,
                 )
-            with self.assertRaises(validators.release_provenance.ProvenanceError):
-                validators.release_provenance.verify_published_manifest(
-                    directory,
-                    tag=f"v{version}",
-                    version=version,
-                    source_sha=source_sha,
-                    build_run_id=build_run_id,
-                    build_run_number=build_run_number,
-                    test_run_id=test_run_id,
-                    test_run_number=test_run_number,
-                    publish_run_id=publish_run_id + 1,
-                    publish_run_number=publish_run_number,
-                    android_version_code=version_code,
-                    apple_build_number=apple_build_number,
-                    build_manifest_sha256="b" * 64,
-                    test_result_sha256="c" * 64,
-                    release_notes_sha256="d" * 64,
-                    assets=assets,
-                )
+            for selected_publish_id, selected_test_digest in ((publish_run_id + 1, "c" * 64), (publish_run_id, "e" * 64)):
+                with self.assertRaises(validators.release_provenance.ProvenanceError):
+                    validators.release_provenance.verify_published_manifest(
+                        directory,
+                        tag=f"v{version}",
+                        version=version,
+                        source_sha=source_sha,
+                        build_run_id=build_run_id,
+                        build_run_number=build_run_number,
+                        test_run_id=test_run_id,
+                        test_run_number=test_run_number,
+                        publish_run_id=selected_publish_id,
+                        publish_run_number=publish_run_number,
+                        android_version_code=version_code,
+                        apple_build_number=apple_build_number,
+                        build_manifest_sha256="b" * 64,
+                        test_result_sha256=selected_test_digest,
+                        release_notes_sha256="d" * 64,
+                        assets=assets,
+                    )
 
     def test_initialize_accepts_empty_or_current_waiting_deployment_history(self) -> None:
         pages = json.dumps({"status": None}).encode()

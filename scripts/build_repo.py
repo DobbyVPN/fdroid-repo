@@ -258,7 +258,7 @@ def validate_selected_run(
     if isinstance(run, dict):
         invalid = invalid or type(run.get("run_attempt")) is not int or run["run_attempt"] < 1
     if workflow in {"Build", "Test"}:
-        invalid = invalid or run.get("run_attempt") != 1 or run.get("head_sha") != source_sha
+        invalid = invalid or run.get("head_sha") != source_sha
     if invalid:
         raise RepoError(f"selected GitHub Actions run must be the successful {workflow} for this release lineage")
 
