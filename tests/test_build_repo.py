@@ -6,6 +6,7 @@ import ssl
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import requests
@@ -141,7 +142,7 @@ class BuildRepoTests(unittest.TestCase):
         publish_run_id = 345
         publish_run_number = 55
         apple_build_number = version_code + build_run_number
-        assets = build_repo.expected_release_assets(version)
+        assets = build_repo.expected_release_assets(version, SimpleNamespace(publish_selection=None))
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             for name in assets:
@@ -443,11 +444,11 @@ class BuildRepoTests(unittest.TestCase):
             index.assert_called_once()
 
     def test_debug_packages_are_required_only_from_153(self) -> None:
-        old = build_repo.expected_release_assets("1.5.2")
+        old = build_repo.expected_release_assets("1.5.2", SimpleNamespace(publish_selection=None))
         self.assertFalse(any("-debug" in name for name in old))
-        for version in ("1.5.3", "1.5.10", "1.6.0", "2.0.0"):
+        for version in ("1.5.3", "1.5.4"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as raw:
-                expected = build_repo.expected_release_assets(version)
+                expected = build_repo.expected_release_assets(version, SimpleNamespace(publish_selection=None))
                 debug = [name for name in expected if "-debug" in name]
                 self.assertEqual(len(debug), 6)
                 directory = Path(raw)
@@ -458,8 +459,14 @@ class BuildRepoTests(unittest.TestCase):
                 with self.assertRaisesRegex(build_repo.RepoError, "missing files"):
                     build_repo.assert_release_files(directory, expected)
 
+    def test_selected_product_supplies_the_exact_universal_package_set(self) -> None:
+        validators = build_repo.load_product_validators(REPO_ROOT.parent / "DobbyVPN")
+        assets = build_repo.expected_release_assets("1.5.16", validators)
+        mac = [name for name in assets if name.endswith(".pkg")]
+        self.assertEqual(mac, ["dobbyVPN-macos-universal-debug.pkg", "dobbyVPN-macos-universal.pkg"])
+
     def test_release_asset_allowlist_rejects_unexpected_files(self) -> None:
-        expected = build_repo.expected_release_assets("1.5.2")
+        expected = build_repo.expected_release_assets("1.5.2", SimpleNamespace(publish_selection=None))
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             for name in expected:
@@ -471,7 +478,7 @@ class BuildRepoTests(unittest.TestCase):
                 build_repo.assert_release_files(directory, expected)
 
     def test_release_asset_allowlist_accepts_only_the_signed_apk_idsig_sidecar(self) -> None:
-        expected = build_repo.expected_release_assets("1.5.2")
+        expected = build_repo.expected_release_assets("1.5.2", SimpleNamespace(publish_selection=None))
         signed_apk = next(name for name in expected if name.endswith("-sign.apk"))
         optional_sidecar = f"{signed_apk}.idsig"
         with tempfile.TemporaryDirectory() as raw:

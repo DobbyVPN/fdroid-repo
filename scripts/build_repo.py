@@ -192,7 +192,10 @@ def load_product_validators(product_repo: Path) -> Any:
     release_provenance = import_file("dobby_release_provenance", release_dir / "release_provenance.py")
     reproducibility = import_file("dobby_verify_android_reproducibility", android_dir / "verify_android_reproducibility.py")
     apk_source = import_file("dobby_verify_android_apk_source", android_dir / "verify_android_apk_source.py")
+    selection_path = release_dir / "publish_selection.py"
+    selection = import_file("dobby_publish_selection", selection_path) if selection_path.is_file() else None
     return type("ProductValidators", (), {
+        "publish_selection": selection,
         "version_metadata": version_metadata,
         "release_provenance": release_provenance,
         "reproducibility": reproducibility,
@@ -263,7 +266,10 @@ def validate_selected_run(
         raise RepoError(f"selected GitHub Actions run must be the successful {workflow} for this release lineage")
 
 
-def expected_release_assets(version: str) -> list[str]:
+def expected_release_assets(version: str, validators: Any) -> list[str]:
+    # Older release checkouts predate the Product-owned inventory.
+    if validators.publish_selection is not None:
+        return list(validators.publish_selection.expected_assets(version))
     names = list(RELEASE_ASSET_NAMES)
     if tuple(map(int, version.split("."))) >= (1, 5, 3):
         names.extend((
@@ -345,7 +351,7 @@ def verify_release_directory(
     product_repo: Path,
     env: dict[str, str],
 ) -> Path:
-    assets = expected_release_assets(version)
+    assets = expected_release_assets(version, validators)
     assert_release_files(directory, assets)
     validators.release_provenance.verify_published_manifest(
         directory,
